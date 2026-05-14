@@ -1,0 +1,9 @@
+streamlit
+crewai
+langchain-openai
+python-dotenv
+playwright
+pytest
+pytest-playwright
+PyPDF2
+python-docx

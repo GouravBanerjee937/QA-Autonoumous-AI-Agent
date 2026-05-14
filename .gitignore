@@ -1,0 +1,30 @@
+# Environment variables
+.env
+
+# Python virtual environment
+.venv/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs and databases
+*.log
+qa_agent.log
+
+# Pytest and coverage
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# IDEs
+.idea/
+.vscode/
+
+# Playwright
+test-results/
+
+# User specific saves
+saved_user_story.txt
+generated_test.py
+final_qa_report.md
