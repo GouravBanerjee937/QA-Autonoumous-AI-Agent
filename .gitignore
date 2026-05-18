@@ -11,6 +11,7 @@ venv.bak/
 # Logs and databases
 *.log
 qa_agent.log
+qa_agent_multipage.log
 
 # Pytest and coverage
 .pytest_cache/
@@ -26,5 +27,8 @@ test-results/
 
 # User specific saves
 saved_user_story.txt
+saved_user_story_multipage.txt
 generated_test.py
+generated_test_multipage.py
 final_qa_report.md
+final_qa_report_multipage.md

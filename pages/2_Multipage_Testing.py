@@ -3,13 +3,13 @@ import os
 import io
 from PyPDF2 import PdfReader
 from docx import Document
-from main import run_qa_pipeline
+from main_multipage import run_multipage_pipeline
 import time
 
 # ==========================================
 # UI CONFIGURATION & STYLING
 # ==========================================
-st.set_page_config(page_title="QA Agent", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="QA Agent - Multipage", page_icon="🤖", layout="wide")
 
 # Custom CSS for Solid Pink and Black theme (No glow)
 st.markdown("""
@@ -79,7 +79,7 @@ st.markdown("""
 # ==========================================
 # FILE-BASED STATE MANAGEMENT
 # ==========================================
-STORY_FILE = "saved_user_story.txt"
+STORY_FILE = "saved_user_story_multipage.txt"
 
 def load_saved_story():
     if os.path.exists(STORY_FILE):
@@ -92,12 +92,12 @@ def save_story(story_text):
         f.write(story_text)
 
 # Initialize session state from file if not already set
-if "user_story_input" not in st.session_state:
-    st.session_state.user_story_input = load_saved_story()
+if "user_story_input_multipage" not in st.session_state:
+    st.session_state.user_story_input_multipage = load_saved_story()
 
 # Update the file whenever the text area changes
 def on_story_change():
-    save_story(st.session_state.user_story_input)
+    save_story(st.session_state.user_story_input_multipage)
 
 # ==========================================
 # DOCUMENT EXTRACTION HELPERS
@@ -119,8 +119,8 @@ def extract_text_from_docx(file) -> str:
 # ==========================================
 # PAGE CONTENT
 # ==========================================
-st.markdown('<div class="solid-title">🤖 QA Agent</div>', unsafe_allow_html=True)
-st.markdown("<h3 style='text-align: center;'>AI-Powered Automated Testing Pipeline</h3>", unsafe_allow_html=True)
+st.markdown('<div class="solid-title">🤖 QA Agent (Multipage)</div>', unsafe_allow_html=True)
+st.markdown("<h3 style='text-align: center;'>Interactive Scout & Multi-Step Testing</h3>", unsafe_allow_html=True)
 st.write("---")
 
 # Document Upload Section
@@ -129,7 +129,7 @@ uploaded_file = st.file_uploader("Upload a .pdf or .docx file to automatically e
 
 if uploaded_file is not None:
     # Check if we've already processed this exact file to avoid infinite loops
-    if st.session_state.get("last_uploaded_file") != uploaded_file.name:
+    if st.session_state.get("last_uploaded_file_multipage") != uploaded_file.name:
         with st.spinner("Extracting text from document..."):
             extracted_text = ""
             try:
@@ -139,9 +139,9 @@ if uploaded_file is not None:
                     extracted_text = extract_text_from_docx(uploaded_file)
                 
                 if extracted_text.strip():
-                    st.session_state.user_story_input = extracted_text
+                    st.session_state.user_story_input_multipage = extracted_text
                     save_story(extracted_text)
-                    st.session_state["last_uploaded_file"] = uploaded_file.name
+                    st.session_state["last_uploaded_file_multipage"] = uploaded_file.name
                     st.success("Successfully extracted text from document!")
                     st.rerun() # Force a rerun to update the text area
                 else:
@@ -152,13 +152,13 @@ if uploaded_file is not None:
 # User Input Text Area
 user_story = st.text_area(
     "Enter User Story / PRD Requirements:",
-    key="user_story_input",
+    key="user_story_input_multipage",
     on_change=on_story_change,
     height=200,
-    placeholder="e.g., Go to https://app.mazu.in/login, enter email test@test.com, password pass123 and login. Verify successful redirection to dashboard."
+    placeholder="e.g., Go to https://app.mazu.in/login, enter email test@test.com, click login, then enter password pass123 and submit."
 )
 
-if st.button("🚀 Run QA Pipeline"):
+if st.button("🚀 Run Multipage Pipeline"):
     # Always save the latest story right before running, just in case
     save_story(user_story)
 
@@ -170,7 +170,7 @@ if st.button("🚀 Run QA Pipeline"):
         
         # Using Expanders stacked vertically instead of columns for better readability
         test_cases_box = st.expander("📝 1. Test Cases", expanded=False)
-        scout_box = st.expander("🕵️ 2. DOM Scout Output", expanded=False)
+        scout_box = st.expander("🕵️ 2. DOM Scout Output", expanded=True) # Open by default to see loops
         filter_box = st.expander("🗺️ 3. Context Map", expanded=False)
         code_box = st.expander("💻 4. Generated Code", expanded=False)
         execution_box = st.expander("⚙️ 5. Execution Log", expanded=True)
@@ -179,6 +179,7 @@ if st.button("🚀 Run QA Pipeline"):
 
         # Custom callback function to update UI from the backend main.py
         healer_messages = []
+        scout_messages = []
         
         def ui_callback(message, step_type):
             if step_type == "status":
@@ -187,8 +188,19 @@ if st.button("🚀 Run QA Pipeline"):
                 with test_cases_box:
                     st.markdown(message)
             elif step_type == "scout":
+                scout_messages.append(message)
                 with scout_box:
-                    st.code(message, language="json")
+                    for msg in scout_messages:
+                        if msg.startswith("###"):
+                            st.markdown(msg)
+                        elif "Launching" in msg or "Navigating" in msg or "Waiting" in msg or "Extracting" in msg:
+                            st.info(msg)
+                        elif "Successfully extracted" in msg:
+                            st.success(msg)
+                        elif "Error" in msg or "FATAL" in msg:
+                            st.error(msg)
+                        else:
+                            st.code(msg, language="json")
             elif step_type == "filter":
                 with filter_box:
                     st.markdown(message)
@@ -215,7 +227,7 @@ if st.button("🚀 Run QA Pipeline"):
         # Run the pipeline
         try:
             with st.spinner("AI Agents are working... Please wait."):
-                run_qa_pipeline(user_story, ui_callback)
+                run_multipage_pipeline(user_story, ui_callback)
             status_text.success("✅ Pipeline Execution Complete!")
             st.balloons()
         except Exception as e:

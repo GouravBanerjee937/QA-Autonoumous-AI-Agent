@@ -8,9 +8,10 @@ import re
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from crewai import Agent, Task, Crew, Process
+from crewai.tools import tool
 from playwright.sync_api import sync_playwright
 
-import prompts  # Importing the newly created prompts file
+import prompts
 
 # ==========================================
 # 1. SETUP & CONFIGURATION
@@ -19,24 +20,22 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("qa_agent.log"),
+        logging.FileHandler("qa_agent_multipage.log"),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger("QA_Agent_System")
+logger = logging.getLogger("QA_Multipage_Agent_System")
 
 load_dotenv()
 if not os.getenv("OPENAI_API_KEY"):
     logger.error("OPENAI_API_KEY is not set. Please add it to your .env file.")
     raise ValueError("Missing OPENAI_API_KEY in environment variables.")
 
+MODEL_NAME = "gpt-4o"
+
 # ==========================================
 # 2. DEFINE AGENTS
 # ==========================================
-
-# Using gpt-4o as the base model, but logic allows easy swapping
-MODEL_NAME = "gpt-4o"
-
 gherkin_translator = Agent(
     role=prompts.ROLE_GHERKIN_TRANSLATOR,
     goal=prompts.GOAL_GHERKIN_TRANSLATOR,
@@ -92,7 +91,7 @@ qa_reporter = Agent(
 )
 
 # ==========================================
-# 3. HELPER FUNCTIONS (AST, Static Analyzer, Scout)
+# 3. HELPER FUNCTIONS & INTERACTIVE SCOUT
 # ==========================================
 def clean_python_code(raw_output: str) -> str:
     code = raw_output
@@ -112,7 +111,7 @@ def clean_python_code(raw_output: str) -> str:
     return '\n'.join(clean_lines).strip()
 
 def run_tests():
-    process = subprocess.run([sys.executable, "-m", "pytest", "generated_test.py", "-v"], capture_output=True, text=True)
+    process = subprocess.run([sys.executable, "-m", "pytest", "generated_test_multipage.py", "-v"], capture_output=True, text=True)
     return process.stdout + "\n" + process.stderr, process.returncode
 
 class PlaywrightStaticAnalyzer(ast.NodeVisitor):
@@ -146,7 +145,7 @@ def analyze_code_statically(code: str) -> list[str]:
 def parse_pytest_log_for_passed_tests(log: str) -> list[str]:
     passed_tests = []
     for line in log.split('\n'):
-        if " PASSED " in line and "generated_test.py::" in line:
+        if " PASSED " in line and "generated_test_multipage.py::" in line:
             parts = line.split("::")
             if len(parts) > 1:
                 test_name = parts[1].split(" ")[0].split("[")[0] 
@@ -217,138 +216,165 @@ def extract_urls_from_story(text: str) -> list[str]:
     urls = url_pattern.findall(text)
     return [url.rstrip('.,;)') for url in urls]
 
-def deterministic_dom_mapper(elements: list) -> str:
-    mapping = []
-    mapping.append("### Deterministic Context Map")
-    mapping.append("The following elements were identified by the deterministic DOM mapper:\n")
-    
-    email_found = False
-    password_found = False
-    login_btn_found = False
-    
-    for el in elements:
-        tag = el.get('tag', '')
-        el_type = str(el.get('type', '') or '').lower()
-        el_id = str(el.get('id', '') or '').lower()
-        el_name = str(el.get('name', '') or '').lower()
-        el_placeholder = str(el.get('placeholder', '') or '').lower()
-        text = str(el.get('text', '') or '').lower()
-        
-        # 1. Identify Password Field
-        if not password_found and tag == 'input' and el_type == 'password':
-            locator = f"input[type='password']"
-            if el.get('id'):
-                locator = f"#{el.get('id')}"
-            mapping.append(f"- **Password Field**: `{locator}` (Reason: type='password')")
-            password_found = True
-            continue
-            
-        # 2. Identify Email/Username Field
-        if not email_found and tag == 'input':
-            if el_type == 'email' or 'email' in el_id or 'email' in el_name or 'user' in el_id or 'email' in el_placeholder:
-                locator = f"input[type='email']"
-                if el.get('id'):
-                    locator = f"#{el.get('id')}"
-                elif el.get('name'):
-                    locator = f"input[name='{el.get('name')}']"
-                mapping.append(f"- **Email/Username Field**: `{locator}` (Reason: id/name/placeholder suggests email/username)")
-                email_found = True
-                continue
-                
-        # 3. Identify Login Button
-        if not login_btn_found and tag == 'button':
-            if 'login' in text or 'sign in' in text:
-                locator = f"button:has-text('{el.get('text')}')"
-                if el.get('id'):
-                    locator = f"#{el.get('id')}"
-                mapping.append(f"- **Login/Submit Button**: `{locator}` (Reason: text contains '{text}')")
-                login_btn_found = True
-                continue
-                
-    if not (email_found and password_found and login_btn_found):
-        mapping.append("\n*Warning: Deterministic mapper could not find all primary login elements.*")
-        
-    return "\n".join(mapping)
+# ==========================================
+# INTERACTIVE SCOUT (Playwright MCP-style Tools)
+# ==========================================
+class InteractiveScoutState:
+    playwright_instance = None
+    browser = None
+    context = None
+    page = None
+    extracted_elements = []
+    action_count = 0
 
-def scout_dom(url: str, ui_callback=None) -> str:
-    def notify_scout(message):
-        logger.info(f"Scout: {message}")
-        if ui_callback:
-            ui_callback(f"{message}", "scout")
+# Need a global reference to ui_callback so tools can log live
+GLOBAL_UI_CALLBACK = None
 
-    notify_scout(f"Launching browser to visit {url}...")
+def _auto_extract_dom():
+    InteractiveScoutState.action_count += 1
+    loop_num = InteractiveScoutState.action_count
+    
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, channel="chrome")
-            page = browser.new_page(ignore_https_errors=True)
+        current_url = InteractiveScoutState.page.url
+        page_title = InteractiveScoutState.page.title()
+        
+        if GLOBAL_UI_CALLBACK:
+            GLOBAL_UI_CALLBACK(f"### Loop {loop_num} for page: {page_title} ({current_url})", "scout")
+            GLOBAL_UI_CALLBACK("Extracting DOM elements...", "scout")
+             
+        found_nodes = InteractiveScoutState.page.evaluate('''() => {
+            const results = [];
+            const nodes = document.querySelectorAll('input, button, a[href]');
+            nodes.forEach(el => {
+                if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+                    results.push({
+                        tag: el.tagName.toLowerCase(),
+                        type: el.type || undefined,
+                        id: el.id || undefined,
+                        name: el.name || undefined,
+                        placeholder: el.placeholder || undefined,
+                        text: el.innerText ? el.innerText.trim() : undefined,
+                        href: el.href || undefined,
+                        className: el.className || undefined
+                    });
+                }
+            });
+            return results;
+        }''')
+        
+        if found_nodes:
+            contextual_nodes = {
+                "loop_number": loop_num,
+                "page_url": current_url,
+                "page_title": page_title,
+                "elements": found_nodes
+            }
+            InteractiveScoutState.extracted_elements.append(contextual_nodes)
             
-            notify_scout("Navigating to URL...")
-            page.goto(url, timeout=600000, wait_until="load")
-            
-            notify_scout("Initial page loaded. Waiting 5 seconds for dynamic content...")
-            page.wait_for_timeout(5000) 
-            
-            notify_scout("Extracting interactive elements...")
-            
-            elements = []
-            selectors = ['input', 'button', 'a[href]']
-            for selector in selectors:
-                try:
-                    found_nodes = page.evaluate(f'''() => {{
-                        const results = [];
-                        const nodes = document.querySelectorAll('{selector}');
-                        nodes.forEach(el => {{
-                            if (el.offsetWidth > 0 && el.offsetHeight > 0) {{
-                                results.push({{
-                                    tag: el.tagName.toLowerCase(),
-                                    type: el.type || undefined,
-                                    id: el.id || undefined,
-                                    name: el.name || undefined,
-                                    placeholder: el.placeholder || undefined,
-                                    text: el.innerText ? el.innerText.trim() : undefined,
-                                    href: el.href || undefined,
-                                    className: el.className || undefined
-                                }});
-                            }}
-                        }});
-                        return results;
-                    }}''')
-                    if found_nodes:
-                        elements.extend(found_nodes)
-                        notify_scout(f"Successfully extracted {len(found_nodes)} <{selector}> element(s).")
-                except Exception as e:
-                    notify_scout(f"Error extracting <{selector}> elements: {e}")
-
-            browser.close()
-            
-            if not elements:
-                notify_scout("Extraction complete, but no visible interactive elements were found.")
-                return json.dumps({"warning": "No interactive elements found on the page."})
-
-            notify_scout(f"Extraction complete. Found a total of {len(elements)} elements.")
-            
-            json_dump = json.dumps(elements, indent=2)
-            print("\n" + "="*50)
-            print("🔍 SCOUT DOM DUMP RESULTS:")
-            print("="*50)
-            print(json_dump)
-            print("="*50 + "\n")
-            
-            if ui_callback:
-                 ui_callback(json_dump, "scout")
-            
-            return json_dump
-            
+            if GLOBAL_UI_CALLBACK:
+                 GLOBAL_UI_CALLBACK(f"Successfully extracted {len(found_nodes)} elements.", "scout")
+                 GLOBAL_UI_CALLBACK(json.dumps(contextual_nodes, indent=2), "scout")
+                 
     except Exception as e:
-        logger.error(f"Scout failed: {e}")
-        notify_scout(f"FATAL ERROR: {e}")
-        return json.dumps({"error": str(e)})
+        if GLOBAL_UI_CALLBACK:
+            GLOBAL_UI_CALLBACK(f"Error during auto DOM extraction: {str(e)}", "scout")
+
+@tool("playwright_navigate")
+def playwright_navigate(url: str) -> str:
+    """Navigates the browser to a specific URL and automatically extracts the DOM."""
+    try:
+        if InteractiveScoutState.page is None:
+            InteractiveScoutState.playwright_instance = sync_playwright().start()
+            InteractiveScoutState.browser = InteractiveScoutState.playwright_instance.chromium.launch(headless=True, channel="chrome")
+            InteractiveScoutState.context = InteractiveScoutState.browser.new_context(ignore_https_errors=True)
+            InteractiveScoutState.page = InteractiveScoutState.context.new_page()
+            InteractiveScoutState.action_count = 0
+            
+        if GLOBAL_UI_CALLBACK:
+            GLOBAL_UI_CALLBACK(f"Navigating to URL: {url}", "scout")
+            
+        InteractiveScoutState.page.goto(url, timeout=60000, wait_until="load")
+        InteractiveScoutState.page.wait_for_timeout(5000)
+        
+        _auto_extract_dom()
+        return f"Successfully navigated to {url} and automatically extracted DOM elements."
+    except Exception as e:
+        if GLOBAL_UI_CALLBACK:
+            GLOBAL_UI_CALLBACK(f"Error navigating to {url}: {str(e)}", "scout")
+        return f"Error navigating to {url}: {str(e)}"
+
+@tool("playwright_click")
+def playwright_click(selector: str) -> str:
+    """Clicks an element on the page using a CSS selector or text (e.g. input#email or text=Login) and automatically extracts the DOM."""
+    try:
+        if InteractiveScoutState.page is None:
+             return "Error: Browser not open. Navigate first."
+             
+        if GLOBAL_UI_CALLBACK:
+            GLOBAL_UI_CALLBACK(f"Clicking element: {selector}", "scout")
+             
+        # Use more robust clicking that waits for the element
+        element = InteractiveScoutState.page.locator(selector).first
+        element.wait_for(state="visible", timeout=15000)
+        element.click(timeout=15000)
+        InteractiveScoutState.page.wait_for_timeout(5000)
+        
+        _auto_extract_dom()
+        return f"Successfully clicked {selector} and automatically extracted DOM elements."
+    except Exception as e:
+        if GLOBAL_UI_CALLBACK:
+            GLOBAL_UI_CALLBACK(f"Error clicking {selector}: {str(e)}", "scout")
+        return f"Error clicking {selector}: {str(e)}"
+
+@tool("playwright_fill")
+def playwright_fill(selector: str, text: str) -> str:
+    """Fills an input element on the page using a CSS selector and automatically extracts the DOM."""
+    try:
+        if InteractiveScoutState.page is None:
+             return "Error: Browser not open. Navigate first."
+             
+        if GLOBAL_UI_CALLBACK:
+            GLOBAL_UI_CALLBACK(f"Filling element: {selector}", "scout")
+             
+        # Use more robust filling that waits for the element
+        element = InteractiveScoutState.page.locator(selector).first
+        element.wait_for(state="visible", timeout=15000)
+        element.fill(text, timeout=15000)
+        InteractiveScoutState.page.wait_for_timeout(2000)
+        
+        _auto_extract_dom()
+        return f"Successfully filled {selector} with text and automatically extracted DOM elements."
+    except Exception as e:
+        if GLOBAL_UI_CALLBACK:
+            GLOBAL_UI_CALLBACK(f"Error filling {selector}: {str(e)}", "scout")
+        return f"Error filling {selector}: {str(e)}"
+
+interactive_scout_agent = Agent(
+    role='Interactive DOM Explorer',
+    goal='Navigate a website, interact with it to complete a user flow, and let the tools extract DOM elements at every step.',
+    backstory=(
+        "You are an automated web crawler. You use Playwright tools to explore web pages. "
+        "You have the ability to navigate, click buttons, and fill forms. "
+        "Your job is to read a User Story, and then actually perform those steps in a live browser to ensure you expose all hidden fields. "
+        "Every tool you use (navigate, click, fill) will AUTOMATICALLY extract the DOM in the background and save it. "
+        "You do not need to call an extract tool. Just focus on following the user story steps exactly. "
+        "CRITICAL: If you need to fill an email, look at the DOM output from the previous step. Use a precise selector like '#userName' or 'input[type=\"text\"]' rather than guessing 'input[type=\"email\"]'. "
+        "If a tool call returns an Error, you must try a different selector."
+    ),
+    tools=[playwright_navigate, playwright_click, playwright_fill],
+    verbose=True,
+    allow_delegation=False,
+    llm=MODEL_NAME
+)
 
 # ==========================================
-# 4. DEFINE PIPELINE WITH CALLBACKS
+# 4. DEFINE MULTIPAGE PIPELINE WITH CALLBACKS
 # ==========================================
-def run_qa_pipeline(user_story: str, ui_callback=None):
-    logger.info("Starting QA Agent Pipeline...")
+def run_multipage_pipeline(user_story: str, ui_callback=None):
+    logger.info("Starting QA Agent Multipage Pipeline...")
+    
+    global GLOBAL_UI_CALLBACK
+    GLOBAL_UI_CALLBACK = ui_callback
 
     def notify(message, step_type):
         if ui_callback:
@@ -357,7 +383,7 @@ def run_qa_pipeline(user_story: str, ui_callback=None):
             print(f"\n[{step_type.upper()}] {message}")
 
     # --- STEP 0: Translate to Gherkin ---
-    notify("Agent 0 (Gherkin Translator) is converting the PRD to BDD syntax...", "status")
+    notify("Agent 0 (Gherkin Translator) is forcefully converting the PRD to BDD syntax...", "status")
     gherkin_task = Task(
         description=prompts.TASK_GHERKIN_TRANSLATOR.format(user_story=user_story),
         expected_output="A clean Gherkin syntax scenario block.",
@@ -380,56 +406,82 @@ def run_qa_pipeline(user_story: str, ui_callback=None):
     crew_plan.kickoff()
     plan_output = plan_task.output.raw
     
-    # Send generated test plan to the UI
     notify(f"### Generated Test Plan:\n\n{plan_output}", "test_cases")
 
-    # --- STEP 1.5: Scout & Filter (DOM Discovery) ---
+    # --- STEP 1.5: INTERACTIVE SCOUT (DOM Discovery) ---
     urls = extract_urls_from_story(user_story)
     context_map = "No URL provided in the User Story. Generator must guess selectors."
     
     if urls:
         target_url = urls[0]
-        notify(f"Scout Agent is launching to inspect {target_url}...", "status")
-        scout_raw_json = scout_dom(target_url, ui_callback) 
+        notify(f"Interactive Scout Agent is launching to explore {target_url}...", "status")
         
-        if "error" not in scout_raw_json and "warning" not in scout_raw_json:
-            notify("Applying Deterministic DOM Mapper...", "status")
-            elements = json.loads(scout_raw_json)
-            deterministic_map = deterministic_dom_mapper(elements)
+        # Reset state
+        InteractiveScoutState.extracted_elements = []
+        InteractiveScoutState.action_count = 0
+        
+        scout_task = Task(
+            description=(
+                f"You need to follow this user story: {gherkin_output}\n\n"
+                f"1. Call `playwright_navigate('{target_url}')`.\n"
+                f"2. Look at the user story. If it says to fill in an email, call `playwright_fill` with a likely selector. Use '#userName' or 'input[placeholder=\"Mobile / Email\"]' if you are on mazu.in.\n"
+                f"3. If it says to click next/login, call `playwright_click` on that button. Use 'button:has-text(\"Login\")'.\n"
+                "Stop once you have completed the basic flow or if you get stuck. The tools will auto-extract the DOM for you."
+            ),
+            expected_output="A brief summary of what you clicked and explored.",
+            agent=interactive_scout_agent
+        )
+        
+        try:
+            crew_scout = Crew(agents=[interactive_scout_agent], tasks=[scout_task], verbose=True)
+            crew_scout.kickoff()
+        finally:
+            if InteractiveScoutState.browser:
+                try:
+                    InteractiveScoutState.browser.close()
+                    InteractiveScoutState.playwright_instance.stop()
+                except:
+                    pass
+                InteractiveScoutState.browser = None
+                InteractiveScoutState.page = None
+                InteractiveScoutState.context = None
+                InteractiveScoutState.playwright_instance = None
+        
+        # Combine all extracted DOM states from memory
+        scout_raw_json = json.dumps(InteractiveScoutState.extracted_elements, indent=2)
+        
+        print("\n" + "="*50)
+        print("🔍 INTERACTIVE SCOUT DOM DUMP RESULTS (COMBINED):")
+        print("="*50)
+        print(scout_raw_json)
+        print("="*50 + "\n")
+        
+        if ui_callback:
+             ui_callback(scout_raw_json, "scout")
+        
+        if InteractiveScoutState.extracted_elements:
+            notify("Filter Agent is analyzing the combined raw DOM data from all steps...", "status")
+            filter_task = Task(
+                description=prompts.TASK_DOM_FILTER.format(gherkin_output=gherkin_output, target_url=target_url, scout_raw_json=scout_raw_json),
+                expected_output="A Markdown mapping of logical elements (e.g., 'Email Input', 'Login Button', 'Password Input') to their exact CSS locators based on the JSON.",
+                agent=dom_filter_agent
+            )
+            crew_filter = Crew(agents=[dom_filter_agent], tasks=[filter_task], verbose=True)
+            crew_filter.kickoff()
+            context_map = filter_task.output.raw
+            notify(context_map, "filter")
             
-            if "Warning:" not in deterministic_map:
-                context_map = deterministic_map
-                notify("Deterministic Mapper succeeded! Bypassing LLM Filter Agent.", "status")
-                notify(context_map, "filter")
-                
-                print("\n" + "="*50)
-                print("🗺️ DETERMINISTIC CONTEXT MAP:")
-                print("="*50)
-                print(context_map)
-                print("="*50 + "\n")
-            else:
-                notify("Deterministic Mapper failed to find all elements. Falling back to LLM Filter Agent...", "status")
-                filter_task = Task(
-                    description=prompts.TASK_DOM_FILTER.format(gherkin_output=gherkin_output, target_url=target_url, scout_raw_json=scout_raw_json),
-                    expected_output="A Markdown mapping of logical elements (e.g., 'Email Input', 'Login Button') to their exact CSS locators based on the JSON.",
-                    agent=dom_filter_agent
-                )
-                crew_filter = Crew(agents=[dom_filter_agent], tasks=[filter_task], verbose=True)
-                crew_filter.kickoff()
-                context_map = filter_task.output.raw
-                notify(context_map, "filter")
-                
-                print("\n" + "="*50)
-                print("🗺️ LLM FILTER AGENT CONTEXT MAP:")
-                print("="*50)
-                print(context_map)
-                print("="*50 + "\n")
+            print("\n" + "="*50)
+            print("🗺️ LLM FILTER AGENT CONTEXT MAP:")
+            print("="*50)
+            print(context_map)
+            print("="*50 + "\n")
 
         else:
-            context_map = f"Scout failed to access {target_url}. Error: {scout_raw_json}. Generator must fall back to robust selector guessing."
+            context_map = f"Scout failed to find any elements. Generator must fall back to robust selector guessing."
 
     # --- STEP 2: Generate Code ---
-    notify("Agent 2 (Test Generator) is writing Playwright code using Context Map...", "status")
+    notify("Agent 2 (Test Generator) is writing Playwright code...", "status")
     code_task = Task(
         description=prompts.TASK_TEST_GENERATOR.format(plan_output=plan_output, context_map=context_map),
         expected_output="Raw Python script using Playwright and pytest.",
@@ -462,7 +514,7 @@ def run_qa_pipeline(user_story: str, ui_callback=None):
         notify("Static Analysis Passed: Code is clean of known anti-patterns.", "healer_log")
 
     notify(code_output, "code")
-    with open("generated_test.py", "w") as f:
+    with open("generated_test_multipage.py", "w") as f:
         f.write(code_output)
     
     # --- STEP 3: Execute Test (First Pass) ---
@@ -498,7 +550,7 @@ def run_qa_pipeline(user_story: str, ui_callback=None):
         else:
             healed_code = raw_healed_code
             
-        with open("generated_test.py", "w") as f:
+        with open("generated_test_multipage.py", "w") as f:
             f.write(healed_code)
             
         current_code = healed_code
@@ -528,12 +580,8 @@ def run_qa_pipeline(user_story: str, ui_callback=None):
     crew_report.kickoff()
     report_output = report_task.output.raw
 
-    with open("final_qa_report.md", "w") as f:
+    with open("final_qa_report_multipage.md", "w") as f:
         f.write(report_output)
     
     notify(report_output, "report")
     return report_output
-
-if __name__ == "__main__":
-    sample_user_story = "Go to https://app.mazu.in/login, enter email gouravbanerjee777@gmail.com, password Namita@2026 and login."
-    run_qa_pipeline(sample_user_story)

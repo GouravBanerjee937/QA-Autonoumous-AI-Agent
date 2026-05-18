@@ -2309,6 +2309,14 @@ wheels = [
 ]
 
 [[package]]
+name = "prompts"
+version = "0.0.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/58/2ff14f9245621d2f8b411525c0fc8e557224eaf2723029d5b852da376216/prompts-0.0.1-py3-none-any.whl", hash = "sha256:7cc240be453c512439c00b2145cd1f3aa3796a031661ed4a52f9ab5a060ffb19", size = 1227, upload-time = "2021-05-10T12:08:34.381Z" },
+]
+
+[[package]]
 name = "propcache"
 version = "0.5.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2919,6 +2927,7 @@ dependencies = [
     { name = "crewai" },
     { name = "langchain-openai" },
     { name = "playwright" },
+    { name = "prompts" },
     { name = "pypdf2" },
     { name = "pytest" },
     { name = "python-docx" },
@@ -2931,6 +2940,7 @@ requires-dist = [
     { name = "crewai", specifier = ">=1.14.4" },
     { name = "langchain-openai", specifier = ">=1.2.1" },
     { name = "playwright", specifier = ">=1.59.0" },
+    { name = "prompts", specifier = ">=0.0.1" },
     { name = "pypdf2", specifier = ">=3.0.1" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "python-docx", specifier = ">=1.2.0" },
