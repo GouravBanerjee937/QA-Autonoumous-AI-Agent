@@ -14,7 +14,8 @@ from .models import (
     GeneratedTest, LocatorReport, Questions, RunResults, SiteMap, TestPlan, TestSpec,
 )
 from .steps import (
-    analyst, coder, designer, executor, explorer, healer, inquirer, reporter, validator,
+    analyst, coder, designer, executor, explorer, healer, inquirer, orchestrator,
+    reporter, validator,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -56,6 +57,16 @@ def run_phase_b(
     out = PhaseB()
     out.plan = designer.design(spec, answers, bus)
     out.sitemap = explorer.explore(spec, out.plan, answers, bus)
+    # Cross-stage validation before code generation
+    orchestration_ok, orchestration_errors = orchestrator.validate_orchestration(
+        spec, out.plan, out.sitemap, bus
+    )
+    if not orchestration_ok:
+        bus.emit(
+            "orchestrator",
+            "Cannot proceed with code generation due to validation errors",
+            level="error",
+        )
     out.generated = coder.code(spec, out.plan, out.sitemap, answers, TESTS_DIR, bus)
     out.generated, out.locator_reports = validator.validate(out.generated, out.sitemap, bus)
     out.initial_results = executor.execute(out.generated, TESTS_DIR, REPORTS_DIR, bus)

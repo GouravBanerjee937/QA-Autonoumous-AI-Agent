@@ -20,8 +20,8 @@ import sys
 from pathlib import Path
 
 from qa_agent.events import EventBus, stdout_sink
-from qa_agent.steps import analyst, designer, explorer, coder
-from qa_agent.pipeline import TESTS_DIR
+from qa_agent.steps import analyst, designer
+from qa_agent import pipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -73,14 +73,14 @@ def main():
         plan = designer.design(spec, answers, bus)
         print(f"      ✓ Plan: {len(plan.test_cases)} test case(s)")
 
-        # Phase B: Explorer (with interactive login probe)
-        print("\n[3/4] Explorer: probing URLs and login flow...")
-        sitemap = explorer.explore(spec, plan, answers, bus)
+        # Phase B: Run full pipeline (Explorer → Orchestrator → Coder → Validator → Executor)
+        print("\n[3/4] Running Phase B (Explorer through Validator)...")
+        phase_b = pipeline.run_phase_b(spec, answers, bus)
 
-        # ASSERTION 1: Signup/redirect page captured in SiteMap
+        # ASSERTION 1: Sitemap captured multiple URL states
         print("\n[CHECK] Post-login pages captured in SiteMap?")
-        has_signup = any("signup" in url.lower() for url in sitemap.pages.keys())
-        has_multi_state = len(sitemap.pages) >= 2
+        sitemap = phase_b.sitemap
+        has_multi_state = sitemap and len(sitemap.pages) >= 2
 
         if has_multi_state:
             print(f"      ✅ Found {len(sitemap.pages)} unique URL state(s):")
@@ -89,12 +89,13 @@ def main():
                 print(f"         - {url}: {elem_count} element(s)")
         else:
             print("      ❌ FAILED: Only 1 URL state captured. Expected multiple states (login → redirect).")
-            print(f"      URLs: {list(sitemap.pages.keys())}")
+            if sitemap:
+                print(f"      URLs: {list(sitemap.pages.keys())}")
             return 1
 
-        # Phase B: Coder (generate test code)
-        print("\n[4/4] Coder: generating test code...")
-        generated = coder.code(spec, plan, sitemap, answers, TESTS_DIR, bus)
+        # ASSERTION 1b: Code was actually generated
+        print("\n[4/4] Code generation status...")
+        generated = phase_b.generated
         print(f"      ✓ Generated {len(generated)} test file(s)")
 
         # ASSERTION 2: Generated code is mostly complete (allow up to 1 NEEDS for legitimately hidden fields)
